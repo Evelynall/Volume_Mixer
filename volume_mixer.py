@@ -51,22 +51,31 @@ class AudioSession:
         self.target_min_db = -30.0  # 目标最小dB值
         self.target_max_db = -20.0  # 目标最大dB值
         self.adjustment_speed = 0.02  # 调节速度（每次调节的步长）
+        
+        # 背景音/前景音相关属性
+        self.role = "normal"  # 角色：normal(普通), foreground(前景), background(背景)
+        self.saved_volume = None  # 保存的原始音量
+        self.is_ducked = False  # 是否被压低
+        self.peak = 0.0  # 缓存的峰值
     
     def load_config(self, config):
-        """从配置中加载自动调节设置"""
+        """从配置中加载设置"""
         if 'auto_adjust_enabled' in config:
             self.auto_adjust_enabled = config['auto_adjust_enabled']
         if 'target_min_db' in config:
             self.target_min_db = config['target_min_db']
         if 'target_max_db' in config:
             self.target_max_db = config['target_max_db']
+        if 'role' in config:
+            self.role = config['role']
     
     def get_config(self):
         """获取当前配置"""
         return {
             'auto_adjust_enabled': self.auto_adjust_enabled,
             'target_min_db': self.target_min_db,
-            'target_max_db': self.target_max_db
+            'target_max_db': self.target_max_db,
+            'role': self.role
         }
         
     def _get_display_name(self):
@@ -168,8 +177,8 @@ class VolumeMixerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("音量混合器")
-        self.root.geometry("750x700")
-        self.root.minsize(700, 500)
+        self.root.geometry("600x750")
+        self.root.minsize(600, 750)
         self.root.resizable(True, True)
         
         # 设置窗口图标和样式
@@ -181,11 +190,19 @@ class VolumeMixerApp:
         self.session_widgets = {}
         self.running = True
         
-        # 加载配置
-        self.config = self._load_config()
+        # 前景音/背景音设置
+        self.foreground_threshold = -40.0  # 前景音触发阈值(dB)
+        self.background_volume_ratio = 0.3  # 背景音相对前景音的音量比例
         
         # 创建主界面
         self._create_ui()
+        
+        # 加载配置（在UI创建后执行，以便初始化UI变量）
+        self.config = self._load_config()
+        
+        # 更新UI中的设置值
+        self.threshold_var.set(str(self.foreground_threshold))
+        self.ratio_var.set(str(int(self.background_volume_ratio * 100)))
         
         # 初始化系统托盘
         self._init_systray()
@@ -224,6 +241,48 @@ class VolumeMixerApp:
             command=self._refresh_sessions
         )
         refresh_btn.pack(side=tk.RIGHT)
+        
+        # 前景音/背景音设置区域
+        ducking_frame = ttk.LabelFrame(self.root, text="前景音/背景音设置", padding="10")
+        ducking_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # 前景音阈值设置
+        threshold_frame = ttk.Frame(ducking_frame)
+        threshold_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(threshold_frame, text="前景音阈值:", width=12).pack(side=tk.LEFT)
+        
+        self.threshold_var = tk.StringVar(value=str(self.foreground_threshold))
+        threshold_entry = ttk.Entry(
+            threshold_frame, 
+            textvariable=self.threshold_var, 
+            width=8,
+            justify=tk.CENTER
+        )
+        threshold_entry.pack(side=tk.LEFT, padx=5)
+        threshold_entry.bind('<Return>', lambda e: self._apply_global_settings())
+        threshold_entry.bind('<FocusOut>', lambda e: self._apply_global_settings())
+        
+        ttk.Label(threshold_frame, text="dB (前景音高于此值时压低背景音)").pack(side=tk.LEFT)
+        
+        # 背景音音量比例设置
+        ratio_frame = ttk.Frame(ducking_frame)
+        ratio_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(ratio_frame, text="背景音比例:", width=12).pack(side=tk.LEFT)
+        
+        self.ratio_var = tk.StringVar(value=str(int(self.background_volume_ratio * 100)))
+        ratio_entry = ttk.Entry(
+            ratio_frame, 
+            textvariable=self.ratio_var, 
+            width=8,
+            justify=tk.CENTER
+        )
+        ratio_entry.pack(side=tk.LEFT, padx=5)
+        ratio_entry.bind('<Return>', lambda e: self._apply_global_settings())
+        ratio_entry.bind('<FocusOut>', lambda e: self._apply_global_settings())
+        
+        ttk.Label(ratio_frame, text="% (背景音相对前景音的音量百分比)").pack(side=tk.LEFT)
         
         # 分隔线
         ttk.Separator(self.root, orient='horizontal').pack(fill=tk.X, padx=10, pady=5)
@@ -386,6 +445,53 @@ class VolumeMixerApp:
         volume_percent = ttk.Label(slider_frame, text="100%", width=5)
         volume_percent.pack(side=tk.RIGHT)
         
+        # 角色选择
+        role_frame = ttk.Frame(frame)
+        role_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(role_frame, text="角色:", width=6).pack(side=tk.LEFT)
+        
+        role_var = tk.StringVar(value=session.role)
+        
+        def on_role_change(new_role):
+            session.role = new_role
+            # 清除其他角色的标记（每个应用只能有一个角色）
+            for pid, sess in self.audio_sessions.items():
+                if pid != session.process_id and sess.role == new_role:
+                    sess.role = "normal"
+                    if pid in self.session_widgets:
+                        self.session_widgets[pid]['role_var'].set("normal")
+        
+        normal_btn = ttk.Radiobutton(
+            role_frame, 
+            text="普通", 
+            variable=role_var, 
+            value="normal",
+            command=lambda: on_role_change("normal")
+        )
+        normal_btn.pack(side=tk.LEFT, padx=5)
+        
+        foreground_btn = ttk.Radiobutton(
+            role_frame, 
+            text="前景", 
+            variable=role_var, 
+            value="foreground",
+            command=lambda: on_role_change("foreground")
+        )
+        foreground_btn.pack(side=tk.LEFT, padx=5)
+        
+        background_btn = ttk.Radiobutton(
+            role_frame, 
+            text="背景", 
+            variable=role_var, 
+            value="background",
+            command=lambda: on_role_change("background")
+        )
+        background_btn.pack(side=tk.LEFT, padx=5)
+        
+        role_hint = ttk.Label(role_frame, text="(前景触发时自动压低背景)", foreground='gray')
+        role_hint.pack(side=tk.LEFT, padx=10)
+        
         # 第三行：实时音量表
         meter_frame = ttk.Frame(frame)
         meter_frame.pack(fill=tk.X, pady=5)
@@ -472,6 +578,7 @@ class VolumeMixerApp:
             'auto_btn': auto_btn,
             'target_min_var': target_min_var,
             'target_max_var': target_max_var,
+            'role_var': role_var,
             'session': session
         }
     
@@ -522,6 +629,88 @@ class VolumeMixerApp:
         except ValueError:
             messagebox.showwarning("警告", "请输入有效的数值")
     
+    def _apply_global_settings(self):
+        """应用全局前景音/背景音设置"""
+        try:
+            # 解析前景音阈值
+            threshold = float(self.threshold_var.get())
+            if threshold < -60 or threshold > 0:
+                messagebox.showwarning("警告", "阈值应在 -60 到 0 dB 之间")
+                return
+            self.foreground_threshold = threshold
+            
+            # 解析背景音比例
+            ratio = float(self.ratio_var.get())
+            if ratio < 0 or ratio > 100:
+                messagebox.showwarning("警告", "比例应在 0 到 100% 之间")
+                return
+            self.background_volume_ratio = ratio / 100.0
+            
+        except ValueError:
+            messagebox.showwarning("警告", "请输入有效的数值")
+    
+    def _smart_ducking(self):
+        """智能压低背景音"""
+        # 查找前景音应用
+        foreground_session = None
+        for pid, session in self.audio_sessions.items():
+            if session.role == "foreground":
+                foreground_session = session
+                break
+        
+        # 获取前景音的实际输出电平
+        if foreground_session:
+            foreground_peak = foreground_session.get_peak()
+            foreground_volume = foreground_session.get_volume()
+            foreground_adjusted = foreground_peak * foreground_volume
+            
+            # 计算前景音dB值
+            if foreground_adjusted > 0:
+                foreground_db = 20 * math.log10(foreground_adjusted)
+            else:
+                foreground_db = -60
+            
+            # 检查是否需要压低背景音
+            if foreground_db > self.foreground_threshold:
+                # 需要压低背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background":
+                        # 保存原始音量（如果还没保存）
+                        if session.saved_volume is None and not session.is_ducked:
+                            session.saved_volume = session.get_volume()
+                            session.is_ducked = True
+                        
+                        # 计算目标音量：前景音音量 * 背景音比例
+                        target_volume = foreground_volume * self.background_volume_ratio
+                        current_volume = session.get_volume()
+                        
+                        # 渐进式调节
+                        if current_volume > target_volume:
+                            new_volume = max(current_volume - 0.05, target_volume)
+                            session.set_volume(new_volume)
+                        elif current_volume < target_volume:
+                            new_volume = min(current_volume + 0.05, target_volume)
+                            session.set_volume(new_volume)
+            else:
+                # 前景音低于阈值，恢复背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background" and session.saved_volume is not None:
+                        current_volume = session.get_volume()
+                        saved_volume = session.saved_volume
+                        
+                        # 渐进式恢复到原始音量
+                        if current_volume < saved_volume:
+                            new_volume = min(current_volume + 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                        elif abs(current_volume - saved_volume) < 0.01:
+                            # 已恢复到原始音量
+                            session.saved_volume = None
+                            session.is_ducked = False
+                        elif current_volume > saved_volume:
+                            # 如果当前音量异常高，也逐步恢复
+                            new_volume = max(current_volume - 0.05, saved_volume)
+                            session.set_volume(new_volume)
+    
     def _monitor_audio(self):
         """音频监控线程"""
         while self.running:
@@ -531,7 +720,21 @@ class VolumeMixerApp:
                 
                 # 检查是否有新会话
                 if set(new_sessions.keys()) != set(self.audio_sessions.keys()):
+                    # 保留已保存的音量设置
+                    saved_volumes = {}
+                    for pid, session in self.audio_sessions.items():
+                        saved_volumes[session.display_name] = session.get_volume()
+                    
                     self.audio_sessions = new_sessions
+                    
+                    # 为新会话应用保存的音量设置
+                    for pid, session in self.audio_sessions.items():
+                        if session.display_name in saved_volumes:
+                            session.set_volume(saved_volumes[session.display_name])
+                        # 加载保存的配置
+                        if session.display_name in self.config:
+                            session.load_config(self.config[session.display_name])
+                    
                     # 在主线程中更新UI
                     self.root.after(0, self._update_session_widgets)
                 
@@ -555,6 +758,9 @@ class VolumeMixerApp:
     
     def _update_meters(self):
         """更新所有音量表"""
+        # 执行智能压低背景音
+        self._smart_ducking()
+        
         for pid, widgets in self.session_widgets.items():
             try:
                 session = widgets['session']
@@ -738,7 +944,18 @@ class VolumeMixerApp:
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    
+                    # 加载全局设置
+                    if '__global__' in config:
+                        if 'foreground_threshold' in config['__global__']:
+                            self.foreground_threshold = config['__global__']['foreground_threshold']
+                        if 'background_volume_ratio' in config['__global__']:
+                            self.background_volume_ratio = config['__global__']['background_volume_ratio']
+                    
+                    # 返回除全局设置外的应用配置
+                    config.pop('__global__', None)
+                    return config
         except Exception as e:
             print(f"加载配置失败: {e}")
         return {}
@@ -748,6 +965,12 @@ class VolumeMixerApp:
         try:
             # 收集所有会话的配置
             config = {}
+            
+            # 保存全局设置
+            config['__global__'] = {
+                'foreground_threshold': self.foreground_threshold,
+                'background_volume_ratio': self.background_volume_ratio
+            }
             
             # 保存当前会话的配置
             for pid, session in self.audio_sessions.items():
@@ -770,9 +993,22 @@ class VolumeMixerService:
         self.config = {}
         self.running = True
         
+        # 前景音/背景音设置
+        self.foreground_threshold = -40.0  # 前景音触发阈值(dB)
+        self.background_volume_ratio = 0.3  # 背景音相对前景音的音量比例
+        
         # 加载配置
         self.config = self._load_config()
         print("配置已加载")
+        
+        # 从配置中加载全局设置
+        if 'foreground_threshold' in self.config:
+            self.foreground_threshold = self.config['foreground_threshold']
+        if 'background_volume_ratio' in self.config:
+            self.background_volume_ratio = self.config['background_volume_ratio']
+        
+        print(f"前景音阈值: {self.foreground_threshold} dB")
+        print(f"背景音比例: {int(self.background_volume_ratio * 100)}%")
         
         # 立即刷新会话并应用配置
         self._refresh_sessions()
@@ -786,7 +1022,18 @@ class VolumeMixerService:
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    
+                    # 加载全局设置
+                    if '__global__' in config:
+                        if 'foreground_threshold' in config['__global__']:
+                            self.foreground_threshold = config['__global__']['foreground_threshold']
+                        if 'background_volume_ratio' in config['__global__']:
+                            self.background_volume_ratio = config['__global__']['background_volume_ratio']
+                    
+                    # 返回除全局设置外的应用配置
+                    config.pop('__global__', None)
+                    return config
         except Exception as e:
             print(f"加载配置失败: {e}")
         return {}
@@ -795,6 +1042,14 @@ class VolumeMixerService:
         """保存配置文件"""
         try:
             config = {}
+            
+            # 保存全局设置
+            config['__global__'] = {
+                'foreground_threshold': self.foreground_threshold,
+                'background_volume_ratio': self.background_volume_ratio
+            }
+            
+            # 保存当前会话的配置
             for pid, session in self.audio_sessions.items():
                 config[session.display_name] = session.get_config()
             
@@ -844,6 +1099,72 @@ class VolumeMixerService:
                 session.load_config(self.config[session.display_name])
                 if session.auto_adjust_enabled:
                     print(f"已为 {session.display_name} 启用自动调节 (目标范围: {session.target_min_db} ~ {session.target_max_db} dB)")
+                if session.role == "foreground":
+                    print(f"已标记 {session.display_name} 为前景音")
+                elif session.role == "background":
+                    print(f"已标记 {session.display_name} 为背景音")
+    
+    def _smart_ducking(self):
+        """智能压低背景音"""
+        # 查找前景音应用
+        foreground_session = None
+        for pid, session in self.audio_sessions.items():
+            if session.role == "foreground":
+                foreground_session = session
+                break
+        
+        # 获取前景音的实际输出电平
+        if foreground_session:
+            foreground_peak = foreground_session.get_peak()
+            foreground_volume = foreground_session.get_volume()
+            foreground_adjusted = foreground_peak * foreground_volume
+            
+            # 计算前景音dB值
+            if foreground_adjusted > 0:
+                foreground_db = 20 * math.log10(foreground_adjusted)
+            else:
+                foreground_db = -60
+            
+            # 检查是否需要压低背景音
+            if foreground_db > self.foreground_threshold:
+                # 需要压低背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background":
+                        # 保存原始音量（如果还没保存）
+                        if session.saved_volume is None and not session.is_ducked:
+                            session.saved_volume = session.get_volume()
+                            session.is_ducked = True
+                        
+                        # 计算目标音量：前景音音量 * 背景音比例
+                        target_volume = foreground_volume * self.background_volume_ratio
+                        current_volume = session.get_volume()
+                        
+                        # 渐进式调节
+                        if current_volume > target_volume:
+                            new_volume = max(current_volume - 0.05, target_volume)
+                            session.set_volume(new_volume)
+                        elif current_volume < target_volume:
+                            new_volume = min(current_volume + 0.05, target_volume)
+                            session.set_volume(new_volume)
+            else:
+                # 前景音低于阈值，恢复背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background" and session.saved_volume is not None:
+                        current_volume = session.get_volume()
+                        saved_volume = session.saved_volume
+                        
+                        # 渐进式恢复到原始音量
+                        if current_volume < saved_volume:
+                            new_volume = min(current_volume + 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                        elif abs(current_volume - saved_volume) < 0.01:
+                            # 已恢复到原始音量
+                            session.saved_volume = None
+                            session.is_ducked = False
+                        elif current_volume > saved_volume:
+                            # 如果当前音量异常高，也逐步恢复
+                            new_volume = max(current_volume - 0.05, saved_volume)
+                            session.set_volume(new_volume)
     
     def _monitor_audio(self):
         """音频监控线程"""
@@ -854,10 +1175,23 @@ class VolumeMixerService:
                 
                 # 检查是否有新会话
                 if set(new_sessions.keys()) != set(self.audio_sessions.keys()):
-                    self.audio_sessions = new_sessions
+                    # 保留已保存的音量设置
+                    saved_volumes = {}
                     for pid, session in self.audio_sessions.items():
+                        saved_volumes[session.display_name] = session.get_volume()
+                    
+                    self.audio_sessions = new_sessions
+                    
+                    # 为新会话应用保存的音量设置
+                    for pid, session in self.audio_sessions.items():
+                        if session.display_name in saved_volumes:
+                            session.set_volume(saved_volumes[session.display_name])
+                        # 加载保存的配置
                         if session.display_name in self.config:
                             session.load_config(self.config[session.display_name])
+                
+                # 执行智能压低背景音
+                self._smart_ducking()
                 
                 # 执行自动调节
                 for pid, session in self.audio_sessions.items():

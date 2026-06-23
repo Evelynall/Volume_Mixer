@@ -51,6 +51,7 @@ class AudioSession:
         self.target_min_db = -30.0  # 目标最小dB值
         self.target_max_db = -20.0  # 目标最大dB值
         self.adjustment_speed = 0.02  # 调节速度（每次调节的步长）
+        self.min_peak_db = -40.0  # 最小电平阈值，低于此值视为无音量
         
         # 背景音/前景音相关属性
         self.role = "normal"  # 角色：normal(普通), foreground(前景), background(背景)
@@ -66,6 +67,8 @@ class AudioSession:
             self.target_min_db = config['target_min_db']
         if 'target_max_db' in config:
             self.target_max_db = config['target_max_db']
+        if 'min_peak_db' in config:
+            self.min_peak_db = config['min_peak_db']
         if 'role' in config:
             self.role = config['role']
     
@@ -75,6 +78,7 @@ class AudioSession:
             'auto_adjust_enabled': self.auto_adjust_enabled,
             'target_min_db': self.target_min_db,
             'target_max_db': self.target_max_db,
+            'min_peak_db': self.min_peak_db,
             'role': self.role
         }
         
@@ -129,6 +133,16 @@ class AudioSession:
             current_volume = self.get_volume()
             
             if peak <= 0:
+                return
+            
+            # 计算原始电平的dB值
+            if peak > 0:
+                peak_db = 20 * math.log10(peak)
+            else:
+                peak_db = -60
+            
+            # 如果原始电平低于最小阈值，视为无音量，不调整
+            if peak_db < self.min_peak_db:
                 return
             
             # 计算当前实际输出电平（dB）
@@ -532,7 +546,7 @@ class VolumeMixerApp:
         auto_btn.pack(side=tk.LEFT, padx=5)
         
         # 目标电平范围设置
-        ttk.Label(auto_frame, text="目标范围:", width=8).pack(side=tk.LEFT)
+        ttk.Label(auto_frame, text="目标:", width=5).pack(side=tk.LEFT, padx=(10, 2))
         
         target_min_var = tk.StringVar(value=str(session.target_min_db))
         target_min_entry = ttk.Entry(
@@ -554,6 +568,20 @@ class VolumeMixerApp:
         )
         target_max_entry.pack(side=tk.LEFT, padx=2)
         
+        ttk.Label(auto_frame, text="dB |").pack(side=tk.LEFT, padx=2)
+        
+        # 最低音量阈值设置
+        ttk.Label(auto_frame, text="最低:", width=5).pack(side=tk.LEFT, padx=2)
+        
+        min_peak_var = tk.StringVar(value=str(session.min_peak_db))
+        min_peak_entry = ttk.Entry(
+            auto_frame, 
+            textvariable=min_peak_var, 
+            width=6,
+            justify=tk.CENTER
+        )
+        min_peak_entry.pack(side=tk.LEFT, padx=2)
+        
         ttk.Label(auto_frame, text="dB").pack(side=tk.LEFT)
         
         # 应用目标范围按钮
@@ -561,8 +589,8 @@ class VolumeMixerApp:
             auto_frame, 
             text="应用", 
             width=6,
-            command=lambda s=session, min_var=target_min_var, max_var=target_max_var: 
-                self._apply_target_range(s, min_var, max_var)
+            command=lambda s=session, min_var=target_min_var, max_var=target_max_var, min_peak=min_peak_var: 
+                self._apply_target_range(s, min_var, max_var, min_peak)
         )
         apply_btn.pack(side=tk.RIGHT)
         
@@ -608,8 +636,8 @@ class VolumeMixerApp:
             btn_text = "开启" if session.auto_adjust_enabled else "关闭"
             widgets['auto_btn'].config(text=btn_text)
     
-    def _apply_target_range(self, session, min_var, max_var):
-        """应用目标电平范围"""
+    def _apply_target_range(self, session, min_var, max_var, min_peak_var=None):
+        """应用目标电平范围和最低阈值"""
         try:
             min_db = float(min_var.get())
             max_db = float(max_var.get())
@@ -625,6 +653,14 @@ class VolumeMixerApp:
             
             session.target_min_db = min_db
             session.target_max_db = max_db
+            
+            # 应用最低音量阈值
+            if min_peak_var is not None:
+                min_peak = float(min_peak_var.get())
+                if min_peak < -60 or min_peak > 0:
+                    messagebox.showwarning("警告", "最低阈值应在 -60 到 0 dB 之间")
+                    return
+                session.min_peak_db = min_peak
             
         except ValueError:
             messagebox.showwarning("警告", "请输入有效的数值")
@@ -664,7 +700,35 @@ class VolumeMixerApp:
             foreground_volume = foreground_session.get_volume()
             foreground_adjusted = foreground_peak * foreground_volume
             
-            # 计算前景音dB值
+            # 计算前景音原始电平的dB值
+            if foreground_peak > 0:
+                foreground_peak_db = 20 * math.log10(foreground_peak)
+            else:
+                foreground_peak_db = -60
+            
+            # 如果前景音原始电平低于最小阈值，视为无音量
+            if foreground_peak_db < foreground_session.min_peak_db:
+                # 前景音无音量，恢复背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background" and session.saved_volume is not None:
+                        current_volume = session.get_volume()
+                        saved_volume = session.saved_volume
+                        
+                        # 渐进式恢复到原始音量
+                        if current_volume < saved_volume:
+                            new_volume = min(current_volume + 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                        elif abs(current_volume - saved_volume) < 0.01:
+                            # 已恢复到原始音量
+                            session.saved_volume = None
+                            session.is_ducked = False
+                        elif current_volume > saved_volume:
+                            # 如果当前音量异常高，也逐步恢复
+                            new_volume = max(current_volume - 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                return
+            
+            # 计算前景音实际输出dB值
             if foreground_adjusted > 0:
                 foreground_db = 20 * math.log10(foreground_adjusted)
             else:
@@ -1119,7 +1183,35 @@ class VolumeMixerService:
             foreground_volume = foreground_session.get_volume()
             foreground_adjusted = foreground_peak * foreground_volume
             
-            # 计算前景音dB值
+            # 计算前景音原始电平的dB值
+            if foreground_peak > 0:
+                foreground_peak_db = 20 * math.log10(foreground_peak)
+            else:
+                foreground_peak_db = -60
+            
+            # 如果前景音原始电平低于最小阈值，视为无音量
+            if foreground_peak_db < foreground_session.min_peak_db:
+                # 前景音无音量，恢复背景音
+                for pid, session in self.audio_sessions.items():
+                    if session.role == "background" and session.saved_volume is not None:
+                        current_volume = session.get_volume()
+                        saved_volume = session.saved_volume
+                        
+                        # 渐进式恢复到原始音量
+                        if current_volume < saved_volume:
+                            new_volume = min(current_volume + 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                        elif abs(current_volume - saved_volume) < 0.01:
+                            # 已恢复到原始音量
+                            session.saved_volume = None
+                            session.is_ducked = False
+                        elif current_volume > saved_volume:
+                            # 如果当前音量异常高，也逐步恢复
+                            new_volume = max(current_volume - 0.05, saved_volume)
+                            session.set_volume(new_volume)
+                return
+            
+            # 计算前景音实际输出dB值
             if foreground_adjusted > 0:
                 foreground_db = 20 * math.log10(foreground_adjusted)
             else:

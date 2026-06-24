@@ -1,4 +1,4 @@
-# 音量混合器 (Volume Mixer)
+# ![图标](app_icon.png)音量混合器 (Volume Mixer)
 
 一个基于 Windows Core Audio API 的音量混合器应用，支持显示和调节各应用音量，并提供实时音量监控、自动调节、前景音/背景音控制，以及无 UI 后台运行模式。
 

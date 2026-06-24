@@ -1,9 +1,10 @@
 import math
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
-from audio_backend import AudioBackend, ROLE_BACKGROUND, ROLE_FOREGROUND, ROLE_NORMAL
+from audio_backend import AudioBackend, ROLE_BACKGROUND, ROLE_FOREGROUND, ROLE_NORMAL, __version__
 
 try:
     import sv_ttk
@@ -14,11 +15,15 @@ except ImportError:
 try:
     import pystray
     from pystray import MenuItem as item
-    from PIL import Image, ImageDraw
+    from PIL import Image
     HAS_SYSTRAY = True
 except ImportError:
     HAS_SYSTRAY = False
 
+
+APP_DIR = Path(__file__).resolve().parent
+ICON_ICO_PATH = APP_DIR / "app_icon.ico"
+ICON_PNG_PATH = APP_DIR / "app_icon.png"
 
 ROLE_DISPLAY_MAP = {
     ROLE_NORMAL: "常规",
@@ -36,7 +41,7 @@ class VolumeMixerApp:
         self.backend.start()
         settings = self.backend.get_settings()
 
-        self.root.title("音量混合器")
+        self.root.title(f"音量混合器 v{__version__}")
         self.root.geometry("600x750")
         self.root.minsize(600, 750)
         self.root.resizable(True, True)
@@ -52,13 +57,25 @@ class VolumeMixerApp:
         self.last_applied_theme = None
         self.running = True
         self.systray_icon = None
+        self.window_icon = None
 
+        self._set_window_icon()
         self._apply_theme(force=True)
         self._create_ui()
         self._init_systray()
         self.backend.request_refresh()
         self._schedule_ui_update()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _set_window_icon(self):
+        try:
+            if ICON_PNG_PATH.exists():
+                self.window_icon = tk.PhotoImage(file=str(ICON_PNG_PATH))
+                self.root.iconphoto(True, self.window_icon)
+            elif ICON_ICO_PATH.exists():
+                self.root.iconbitmap(str(ICON_ICO_PATH))
+        except Exception:
+            pass
 
     def _create_ui(self):
         title_frame = ttk.Frame(self.root, padding="10")
@@ -447,6 +464,7 @@ class VolumeMixerApp:
         self.settings_window.minsize(400, 360)
         self.settings_window.resizable(True, True)
         self.settings_window.protocol("WM_DELETE_WINDOW", self._close_settings)
+        self._set_toplevel_icon(self.settings_window)
 
         main_frame = ttk.Frame(self.settings_window, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -495,6 +513,19 @@ class VolumeMixerApp:
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
         ttk.Button(btn_frame, text="取消", command=self._close_settings).pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Button(btn_frame, text="应用", command=self._apply_settings).pack(side=tk.RIGHT)
+
+        version_label = ttk.Label(main_frame, text=f"版本 {__version__}", anchor=tk.CENTER)
+        version_label.pack(side=tk.BOTTOM, pady=(8, 0))
+        self._style_secondary_label(version_label)
+
+    def _set_toplevel_icon(self, window):
+        try:
+            if self.window_icon is not None:
+                window.iconphoto(True, self.window_icon)
+            elif ICON_ICO_PATH.exists():
+                window.iconbitmap(str(ICON_ICO_PATH))
+        except Exception:
+            pass
 
     def _on_fps_slider_change(self, value):
         self._settings_fps_var.set(str(int(float(value))))
@@ -648,7 +679,7 @@ class VolumeMixerApp:
         if not HAS_SYSTRAY:
             return
         try:
-            image = self._create_tray_icon()
+            image = self._load_tray_icon()
             menu = (
                 item("显示窗口", self._show_window),
                 item("隐藏窗口", self._hide_window),
@@ -659,14 +690,12 @@ class VolumeMixerApp:
         except Exception:
             self.systray_icon = None
 
-    def _create_tray_icon(self):
-        image = Image.new("RGB", (64, 64), (0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        draw.ellipse([10, 10, 54, 54], fill=(100, 150, 255), outline=(255, 255, 255))
-        draw.ellipse([20, 20, 44, 44], fill=(60, 100, 200))
-        draw.arc([5, 5, 59, 59], 0, 360, fill=(150, 180, 255), width=2)
-        draw.arc([0, 0, 64, 64], 0, 360, fill=(120, 150, 255), width=1)
-        return image
+    def _load_tray_icon(self):
+        if ICON_PNG_PATH.exists():
+            return Image.open(ICON_PNG_PATH).convert("RGBA").resize((64, 64))
+        if ICON_ICO_PATH.exists():
+            return Image.open(ICON_ICO_PATH).convert("RGBA").resize((64, 64))
+        return Image.new("RGBA", (64, 64), (60, 100, 200, 255))
 
     def _run_systray(self):
         if self.systray_icon:

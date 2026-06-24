@@ -1,4 +1,8 @@
-# 配置文件
+
+
+.dist/
+
+#配置文件
 volume_mixer_config.json
 
 # Python缓存

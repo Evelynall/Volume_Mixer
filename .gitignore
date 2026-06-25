@@ -1,6 +1,6 @@
-
-.build/*
-.dist/*
+#打包文件
+.build/
+.dist/
 
 #配置文件
 volume_mixer_config.json

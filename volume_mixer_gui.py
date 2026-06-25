@@ -1,10 +1,11 @@
 import math
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
-from audio_backend import AudioBackend, ROLE_BACKGROUND, ROLE_FOREGROUND, ROLE_NORMAL, __version__
+from audio_backend import AudioBackend, ROLE_BACKGROUND, ROLE_FOREGROUND, ROLE_NORMAL, __version__, check_for_update
 
 try:
     import sv_ttk
@@ -66,6 +67,18 @@ class VolumeMixerApp:
         self.backend.request_refresh()
         self._schedule_ui_update()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+        # 启动时静默检查更新
+        self._check_update_on_startup()
+
+    def _check_update_on_startup(self):
+        """启动时静默检查更新，有更新才提示"""
+        def do_check():
+            has_update, latest_version, release_notes = check_for_update(silent=True)
+            if has_update:
+                self.root.after(0, lambda: self._show_update_dialog(latest_version, release_notes))
+
+        threading.Thread(target=do_check, daemon=True).start()
 
     def _set_window_icon(self):
         try:
@@ -530,9 +543,16 @@ class VolumeMixerApp:
         ttk.Button(btn_frame, text="取消", command=self._close_settings).pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Button(btn_frame, text="应用", command=self._apply_settings).pack(side=tk.RIGHT)
 
-        version_label = ttk.Label(main_frame, text=f"版本 {__version__}", anchor=tk.CENTER)
-        version_label.pack(side=tk.BOTTOM, pady=(8, 0))
+        version_frame = ttk.Frame(main_frame)
+        version_frame.pack(side=tk.BOTTOM, pady=(8, 0), fill=tk.X)
+
+        version_label = ttk.Label(version_frame, text=f"版本 {__version__}", anchor=tk.CENTER)
+        version_label.pack(side=tk.LEFT, expand=True)
         self._style_secondary_label(version_label)
+
+        check_update_btn = ttk.Button(version_frame, text="检查更新", command=self._check_for_update)
+        check_update_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        self._check_update_btn = check_update_btn
 
     def _set_toplevel_icon(self, window):
         try:
@@ -579,6 +599,89 @@ class VolumeMixerApp:
         self.ui_fps = fps
         self.backend.update_settings(threshold, ratio / 100.0, fps)
         self._close_settings()
+
+    def _check_for_update(self):
+        """检查更新（完整提示模式）"""
+        # 禁用按钮并修改文本
+        if hasattr(self, "_check_update_btn") and self._check_update_btn:
+            self._check_update_btn.config(state=tk.DISABLED, text="检查更新中...")
+
+        def do_check():
+            has_update, latest_version, release_notes = check_for_update(silent=False)
+
+            # 在主线程中显示结果
+            self.root.after(0, lambda: self._show_update_result(has_update, latest_version, release_notes))
+
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def _show_update_result(self, has_update: bool, latest_version: str, release_notes: str):
+        """显示更新检查结果"""
+        # 恢复按钮
+        if hasattr(self, "_check_update_btn") and self._check_update_btn:
+            try:
+                self._check_update_btn.config(state=tk.NORMAL, text="检查更新")
+            except tk.TclError:
+                pass
+
+        if not has_update:
+            if latest_version:
+                messagebox.showinfo("检查更新", f"当前已是最新版本 v{latest_version}")
+            else:
+                messagebox.showwarning("检查更新", release_notes or "检查更新失败，请稍后重试")
+            return
+
+        # 显示更新对话框
+        self._show_update_dialog(latest_version, release_notes)
+
+    def _show_update_dialog(self, latest_version: str, release_notes: str):
+        """显示更新提示对话框"""
+        update_window = tk.Toplevel(self.root)
+        update_window.title(f"发现新版本 v{latest_version}")
+        update_window.geometry("500x400")
+        update_window.minsize(450, 350)
+        update_window.resizable(True, True)
+        self._set_toplevel_icon(update_window)
+
+        main_frame = ttk.Frame(update_window, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 版本信息
+        info_label = ttk.Label(
+            main_frame,
+            text=f"发现新版本 v{latest_version}\n当前版本 v{__version__}",
+            font=("Microsoft YaHei UI", 11),
+        )
+        info_label.pack(pady=(0, 10))
+
+        # 更新日志
+        ttk.Label(main_frame, text="更新日志:", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W)
+
+        notes_frame = ttk.Frame(main_frame)
+        notes_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 10))
+
+        notes_text = scrolledtext.ScrolledText(notes_frame, wrap=tk.WORD, height=10, font=("Microsoft YaHei UI", 9))
+        notes_text.pack(fill=tk.BOTH, expand=True)
+        notes_text.insert(tk.END, release_notes or "暂无更新日志")
+        notes_text.config(state=tk.DISABLED)
+
+        # 下载按钮
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+
+        def open_github():
+            webbrowser.open("https://github.com/Evelynall/Volume_Mixer/releases")
+
+        def open_lanzou():
+            result = messagebox.showinfo(
+                "蓝奏云下载",
+                "即将打开蓝奏云下载页面\n\n密码: evelynal",
+                parent=update_window,
+            )
+            webbrowser.open("https://evelynal.lanzoum.com/b0j1jdvnc")
+
+        ttk.Button(btn_frame, text="前往 GitHub 下载", command=open_github).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="前往蓝奏云下载", command=open_lanzou).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="关闭", command=update_window.destroy).pack(side=tk.RIGHT)
 
     def _sync_sessions(self, sessions, version):
         session_signature = tuple(snapshot.process_id for snapshot in sessions)

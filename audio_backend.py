@@ -3,15 +3,17 @@ import math
 import os
 import threading
 import time
+import urllib.request
+import urllib.error
 from dataclasses import asdict, dataclass
 from queue import Empty, Queue
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 from comtypes import CoInitialize, CoUninitialize
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation, ISimpleAudioVolume
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "volume_mixer_config.json")
 
@@ -614,3 +616,118 @@ class AudioBackend:
 
     def _bump_version(self):
         self.version += 1
+
+
+def parse_version(version_str: str) -> Tuple[int, ...]:
+    """解析版本字符串为元组，便于比较"""
+    try:
+        parts = version_str.strip().lstrip("v").split(".")
+        return tuple(int(p) for p in parts[:3])
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
+
+def check_for_update(silent: bool = False) -> Tuple[bool, str, str]:
+    """
+    检查 GitHub 仓库是否有新版本
+
+    Args:
+        silent: True 时只返回更新状态，不返回错误信息（用于启动时静默检查）
+
+    Returns:
+        Tuple[bool, str, str]: (是否有更新, 最新版本号, 更新日志/错误信息)
+    """
+    releases_url = "https://github.com/Evelynall/Volume_Mixer/releases"
+
+    def make_request(url: str, timeout: int = 10) -> str:
+        """发起网络请求并返回HTML内容"""
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+
+    def parse_releases_page(html: str) -> Tuple[str, str]:
+        """解析 releases 页面获取最新版本和更新日志"""
+        import re
+
+        # 匹配版本号，如 v1.2.0 或 1.2.0
+        version_pattern = r'/releases/tag/(?:v)?([0-9]+\.[0-9]+\.[0-9]+)'
+        match = re.search(version_pattern, html)
+        if not match:
+            return "", ""
+
+        latest_version = match.group(1)
+
+        # 尝试匹配该版本的更新日志 (在版本标签之后的 markdown-body 内容)
+        version_pos = html.find(f'/releases/tag/v{latest_version}')
+        if version_pos == -1:
+            version_pos = html.find(f'/releases/tag/{latest_version}')
+
+        if version_pos > 0:
+            # 提取该版本区域的内容 (找下一个版本或结束)
+            end_pattern = r'/releases/tag/(?:v)?([0-9]+\.[0-9]+\.[0-9]+)'
+            next_match = re.search(end_pattern, html[version_pos + 100:])
+            if next_match:
+                end_pos = version_pos + 100 + next_match.start()
+            else:
+                end_pos = min(version_pos + 5000, len(html))
+
+            section = html[version_pos:end_pos]
+            # 提取 markdown-body 或 body 中的文本
+            body_pattern = r'<article[^>]*class="[^"]*markdown-body[^"]*"[^>]*>(.*?)</article>'
+            body_match = re.search(body_pattern, section, re.DOTALL)
+            if body_match:
+                notes = body_match.group(1)
+                # 去除 HTML 标签
+                notes = re.sub(r'<[^>]+>', ' ', notes)
+                notes = re.sub(r'\s+', ' ', notes).strip()
+                return latest_version, notes[:2000] if len(notes) > 2000 else notes
+
+        return latest_version, ""
+
+    # 中转服务列表 (优先)
+    proxies = [
+        "https://ghproxy.com/",
+        "https://mirror.ghproxy.com/",
+        "https://gh.proxy.com/",
+    ]
+
+    error_msg = "网络连接失败，请检查网络后重试" if not silent else ""
+
+    # 1. 优先尝试中转
+    for proxy in proxies:
+        try:
+            proxy_url = f"{proxy}{releases_url}"
+            html = make_request(proxy_url, timeout=8)
+            latest_version, release_notes = parse_releases_page(html)
+            if latest_version:
+                current = parse_version(__version__)
+                latest = parse_version(latest_version)
+                return latest > current, latest_version, release_notes
+        except Exception:
+            continue
+
+    # 2. 中转都失败，尝试直连
+    try:
+        html = make_request(releases_url, timeout=10)
+        latest_version, release_notes = parse_releases_page(html)
+        if latest_version:
+            current = parse_version(__version__)
+            latest = parse_version(latest_version)
+            return latest > current, latest_version, release_notes
+    except urllib.error.HTTPError as e:
+        if not silent:
+            error_msg = f"网络错误: HTTP {e.code}"
+    except urllib.error.URLError as e:
+        if not silent:
+            error_msg = f"网络连接失败: {e.reason}"
+    except Exception:
+        pass
+
+    # 3. 都失败
+    return False, "", error_msg

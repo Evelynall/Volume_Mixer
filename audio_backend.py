@@ -11,7 +11,7 @@ import psutil
 from comtypes import CoInitialize, CoUninitialize
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation, ISimpleAudioVolume
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "volume_mixer_config.json")
 
@@ -30,6 +30,7 @@ class GlobalSettings:
 
 @dataclass
 class SessionSnapshot:
+    session_id: str
     process_id: int
     display_name: str
     config_key: str
@@ -111,12 +112,53 @@ class ConfigStore:
             settings.ui_fps = config["ui_fps"]
 
 
-class AudioSession:
-    def __init__(self, session_control, process_id: int):
+class SubSession:
+    """单个音频会话实例的控制接口"""
+
+    def __init__(self, session_control, session_id: str):
         self.session_control = session_control
+        self.session_id = session_id
         self.volume = session_control.QueryInterface(ISimpleAudioVolume)
         self.meter = session_control.QueryInterface(IAudioMeterInformation)
+
+    def get_volume(self):
+        try:
+            return float(self.volume.GetMasterVolume())
+        except Exception:
+            return 0.0
+
+    def set_volume(self, level: float):
+        try:
+            bounded = max(0.0, min(1.0, level))
+            self.volume.SetMasterVolume(bounded, None)
+        except Exception:
+            pass
+
+    def get_peak(self):
+        try:
+            return float(self.meter.GetPeakValue())
+        except Exception:
+            return 0.0
+
+    def get_mute(self):
+        try:
+            return bool(self.volume.GetMute())
+        except Exception:
+            return False
+
+    def set_mute(self, muted: bool):
+        try:
+            self.volume.SetMute(muted, None)
+        except Exception:
+            pass
+
+
+class AudioSession:
+    """聚合同一进程的所有音频会话"""
+
+    def __init__(self, process_id: int):
         self.process_id = process_id
+        self.sub_sessions: List[SubSession] = []
         self.executable_path = self._get_executable_path()
         self.display_name = self._get_display_name()
         self.config_key = self._build_config_key()
@@ -131,6 +173,10 @@ class AudioSession:
         self.is_ducked = False
         self.live_peak = 0.0
         self.live_volume = 0.0
+
+    def add_sub_session(self, session_control, session_id: str):
+        sub = SubSession(session_control, session_id)
+        self.sub_sessions.append(sub)
 
     def _get_process(self):
         if self.process_id <= 0:
@@ -194,38 +240,33 @@ class AudioSession:
         self.is_muted = self.get_mute()
 
     def get_volume(self):
-        try:
-            return float(self.volume.GetMasterVolume())
-        except Exception:
+        if not self.sub_sessions:
             return 0.0
+        return self.sub_sessions[0].get_volume()
 
     def set_volume(self, level: float):
-        try:
-            bounded = max(0.0, min(1.0, level))
-            self.volume.SetMasterVolume(bounded, None)
-            self.live_volume = bounded
-        except Exception:
-            pass
+        for sub in self.sub_sessions:
+            sub.set_volume(level)
+        self.live_volume = level
 
     def get_peak(self):
-        try:
-            return float(self.meter.GetPeakValue())
-        except Exception:
-            return 0.0
+        max_peak = 0.0
+        for sub in self.sub_sessions:
+            peak = sub.get_peak()
+            if peak > max_peak:
+                max_peak = peak
+        return max_peak
 
     def get_mute(self):
-        try:
-            return bool(self.volume.GetMute())
-        except Exception:
+        if not self.sub_sessions:
             return False
+        return self.sub_sessions[0].get_mute()
 
     def toggle_mute(self):
-        try:
-            target = not self.get_mute()
-            self.volume.SetMute(target, None)
-            self.is_muted = target
-        except Exception:
-            pass
+        target = not self.get_mute()
+        for sub in self.sub_sessions:
+            sub.set_mute(target)
+        self.is_muted = target
 
     def auto_adjust_volume(self):
         if not self.auto_adjust_enabled:
@@ -266,6 +307,7 @@ class AudioSession:
 
     def to_snapshot(self):
         return SessionSnapshot(
+            session_id=str(self.process_id),
             process_id=self.process_id,
             display_name=self.display_name,
             config_key=self.config_key,
@@ -352,7 +394,7 @@ class AudioBackend:
             while self.running:
                 try:
                     self._process_commands()
-                    if self.pending_refresh or refresh_counter >= 20:
+                    if self.pending_refresh or refresh_counter >= 5:
                         self._refresh_sessions()
                         self.pending_refresh = False
                         refresh_counter = 0
@@ -460,16 +502,22 @@ class AudioBackend:
         return self.legacy_session_configs.get(session.display_name.lower())
 
     def _discover_sessions(self):
-        sessions = {}
+        sessions_by_pid: Dict[int, AudioSession] = {}
         for session in AudioUtilities.GetAllSessions():
             try:
                 process_id = session.ProcessId
                 if process_id > 0:
-                    audio_session = AudioSession(session._ctl, process_id)
-                    sessions[process_id] = audio_session
+                    try:
+                        session_id = session.InstanceIdentifier
+                    except Exception:
+                        session_id = str(id(session._ctl))
+                    if process_id not in sessions_by_pid:
+                        audio_session = AudioSession(process_id)
+                        sessions_by_pid[process_id] = audio_session
+                    sessions_by_pid[process_id].add_sub_session(session._ctl, session_id)
             except Exception:
                 continue
-        return sessions
+        return sessions_by_pid
 
     def _refresh_runtime_state(self):
         with self.lock:
@@ -477,17 +525,19 @@ class AudioBackend:
                 session.refresh_runtime()
 
     def _normalize_roles_locked(self):
-        foreground_seen = False
-        background_seen = False
+        foreground_pid = None
+        background_pid = None
         for session in self.audio_sessions.values():
             if session.role == ROLE_FOREGROUND:
-                if foreground_seen:
+                if foreground_pid is not None:
                     session.role = ROLE_NORMAL
-                foreground_seen = True
+                else:
+                    foreground_pid = session.process_id
             elif session.role == ROLE_BACKGROUND:
-                if background_seen:
+                if background_pid is not None:
                     session.role = ROLE_NORMAL
-                background_seen = True
+                else:
+                    background_pid = session.process_id
 
     def _smart_ducking(self):
         with self.lock:

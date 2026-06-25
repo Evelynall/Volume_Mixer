@@ -333,11 +333,13 @@ class VolumeMixerApp:
         ttk.Label(target_frame, text="目标:").pack(side=tk.LEFT)
 
         target_min_var = tk.StringVar(value=str(snapshot.target_min_db))
-        ttk.Entry(target_frame, textvariable=target_min_var, width=6, justify=tk.CENTER).pack(side=tk.LEFT, padx=(4, 2))
+        target_min_entry = ttk.Entry(target_frame, textvariable=target_min_var, width=6, justify=tk.CENTER)
+        target_min_entry.pack(side=tk.LEFT, padx=(4, 2))
         ttk.Label(target_frame, text="~").pack(side=tk.LEFT)
 
         target_max_var = tk.StringVar(value=str(snapshot.target_max_db))
-        ttk.Entry(target_frame, textvariable=target_max_var, width=6, justify=tk.CENTER).pack(side=tk.LEFT, padx=2)
+        target_max_entry = ttk.Entry(target_frame, textvariable=target_max_var, width=6, justify=tk.CENTER)
+        target_max_entry.pack(side=tk.LEFT, padx=2)
         ttk.Label(target_frame, text="dB").pack(side=tk.LEFT, padx=(2, 4))
 
         adjust_btn_frame = ttk.Frame(target_frame)
@@ -355,7 +357,8 @@ class VolumeMixerApp:
 
         ttk.Label(target_frame, text="无声阈值:").pack(side=tk.LEFT)
         min_peak_var = tk.StringVar(value=str(snapshot.min_peak_db))
-        ttk.Entry(target_frame, textvariable=min_peak_var, width=6, justify=tk.CENTER).pack(side=tk.LEFT, padx=(4, 2))
+        min_peak_entry = ttk.Entry(target_frame, textvariable=min_peak_var, width=6, justify=tk.CENTER)
+        min_peak_entry.pack(side=tk.LEFT, padx=(4, 2))
         ttk.Label(target_frame, text="dB").pack(side=tk.LEFT, padx=(2, 0))
 
         ttk.Button(
@@ -364,6 +367,10 @@ class VolumeMixerApp:
             width=6,
             command=lambda pid=snapshot.process_id, min_var=target_min_var, max_var=target_max_var, peak_var=min_peak_var: self._apply_target_range(pid, min_var, max_var, peak_var),
         ).pack(side=tk.RIGHT)
+
+        for entry_widget in (target_min_entry, target_max_entry, min_peak_entry):
+            entry_widget.bind("<FocusIn>", lambda event, pid=snapshot.process_id: self._set_editing(pid, True))
+            entry_widget.bind("<FocusOut>", lambda event, pid=snapshot.process_id: self._set_editing(pid, False))
 
         separator = ttk.Separator(self.scrollable_frame, orient="horizontal")
         separator.pack(fill=tk.X, padx=8)
@@ -383,6 +390,10 @@ class VolumeMixerApp:
             "target_min_var": target_min_var,
             "target_max_var": target_max_var,
             "min_peak_var": min_peak_var,
+            "target_min_entry": target_min_entry,
+            "target_max_entry": target_max_entry,
+            "min_peak_entry": min_peak_entry,
+            "is_editing": False,
             "role_var": role_var,
             "expand_frame": expand_frame,
             "expand_btn": expand_btn,
@@ -399,6 +410,11 @@ class VolumeMixerApp:
         widgets = self.session_widgets.get(process_id)
         if widgets:
             widgets["volume_percent"].config(text=f"{int(value)}%")
+
+    def _set_editing(self, process_id, editing):
+        widgets = self.session_widgets.get(process_id)
+        if widgets:
+            widgets["is_editing"] = editing
 
     def _toggle_mute(self, process_id):
         self.backend.toggle_mute(process_id)
@@ -575,9 +591,10 @@ class VolumeMixerApp:
                 if not widgets:
                     continue
                 widgets["role_var"].set(ROLE_DISPLAY_MAP.get(snapshot.role, "常规"))
-                widgets["target_min_var"].set(str(snapshot.target_min_db))
-                widgets["target_max_var"].set(str(snapshot.target_max_db))
-                widgets["min_peak_var"].set(str(snapshot.min_peak_db))
+                if not widgets["is_editing"]:
+                    widgets["target_min_var"].set(str(snapshot.target_min_db))
+                    widgets["target_max_var"].set(str(snapshot.target_max_db))
+                    widgets["min_peak_var"].set(str(snapshot.min_peak_db))
         self.last_version = version
         self._update_meters(sessions)
 

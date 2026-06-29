@@ -358,12 +358,23 @@ class VolumeMixerApp:
         adjust_btn_frame = ttk.Frame(target_frame)
         adjust_btn_frame.pack(side=tk.LEFT, padx=(0, 10))
 
+        edit_after_id = [None]
+
         def adjust_target_range(delta):
             try:
                 target_min_var.set(str(float(target_min_var.get()) + delta))
                 target_max_var.set(str(float(target_max_var.get()) + delta))
             except ValueError:
                 pass
+            widgets = self.session_widgets.get(snapshot.process_id)
+            if widgets:
+                widgets["is_editing"] = True
+                if edit_after_id[0] is not None:
+                    self.root.after_cancel(edit_after_id[0])
+                edit_after_id[0] = self.root.after(
+                    2000,
+                    lambda pid=snapshot.process_id: self._set_editing(pid, False)
+                )
 
         ttk.Button(adjust_btn_frame, text="◀", width=1.5, command=lambda: adjust_target_range(-1)).pack(side=tk.LEFT)
         ttk.Button(adjust_btn_frame, text="▶", width=1.5, command=lambda: adjust_target_range(1)).pack(side=tk.LEFT, padx=(2, 0))

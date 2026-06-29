@@ -13,7 +13,7 @@ import psutil
 from comtypes import CoInitialize, CoUninitialize
 from pycaw.pycaw import AudioUtilities, IAudioMeterInformation, ISimpleAudioVolume
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "volume_mixer_config.json")
 
